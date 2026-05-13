@@ -13,9 +13,14 @@ import pandas as pd
 import threading
 import time
 import logging
+import sys
 import os
 from pathlib import Path
 from io import StringIO
+
+# Add parent directory to path so scraper module can be imported
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 
 from scraper.paginator import scrape_all_pages
 from scraper.downloader import download_from_csv
@@ -64,6 +69,17 @@ if page == "🔍 Scrape":
 
     st.divider()
 
+    # ── SESSION STATE INIT ────────────────────────────────────────────────────
+    if "scrape_thread"   not in st.session_state: st.session_state.scrape_thread   = None
+    if "stop_event"      not in st.session_state: st.session_state.stop_event      = None
+    if "scrape_results"  not in st.session_state: st.session_state.scrape_results  = None
+    if "scrape_error"    not in st.session_state: st.session_state.scrape_error    = None
+    if "scrape_running"  not in st.session_state: st.session_state.scrape_running  = False
+    if "scrape_stopped"  not in st.session_state: st.session_state.scrape_stopped  = False
+    if "pages_scraped"   not in st.session_state: st.session_state.pages_scraped   = 0
+    if "items_found"     not in st.session_state: st.session_state.items_found     = 0
+    if "last_url"        not in st.session_state: st.session_state.last_url        = ""
+
     # ── INPUTS ────────────────────────────────────────────────────────────────
     col1, col2 = st.columns([3, 1])
 
@@ -71,11 +87,13 @@ if page == "🔍 Scrape":
         url = st.text_input(
             "Page URL",
             placeholder="https://example.com/category/kurta",
+            disabled=st.session_state.scrape_running,
         )
     with col2:
         category = st.text_input(
             "Garment Category",
             placeholder="e.g. shalwar kameez",
+            disabled=st.session_state.scrape_running,
         )
 
     col3, col4 = st.columns([2, 1])
@@ -84,92 +102,142 @@ if page == "🔍 Scrape":
             "CSV filename",
             value="results.csv",
             help="Saved inside your output folder.",
+            disabled=st.session_state.scrape_running,
         )
     with col4:
-        follow_pagination = st.checkbox("Follow pagination", value=True)
-        max_pages = st.number_input("Max pages", min_value=1, max_value=100, value=20)
+        follow_pagination = st.checkbox("Follow pagination", value=True,  disabled=st.session_state.scrape_running)
+        max_pages         = st.number_input("Max pages", min_value=1, max_value=100, value=20, disabled=st.session_state.scrape_running)
 
     st.divider()
 
-    # ── SCRAPE BUTTON ─────────────────────────────────────────────────────────
-    start = st.button("🚀 Start Scraping", use_container_width=True, type="primary")
+    # ── START / STOP BUTTONS ──────────────────────────────────────────────────
+    btn_col1, btn_col2 = st.columns(2)
 
+    with btn_col1:
+        start = st.button(
+            "🚀 Start Scraping",
+            use_container_width=True,
+            type="primary",
+            disabled=st.session_state.scrape_running,
+        )
+    with btn_col2:
+        stop = st.button(
+            "⏹ Stop Scraping",
+            use_container_width=True,
+            disabled=not st.session_state.scrape_running,
+        )
+
+    # ── STOP SIGNAL ───────────────────────────────────────────────────────────
+    if stop and st.session_state.stop_event:
+        st.session_state.stop_event.set()
+        st.session_state.scrape_stopped = True
+        st.warning("⏹ Stop signal sent — finishing current page then halting...")
+
+    # ── LAUNCH SCRAPE THREAD ──────────────────────────────────────────────────
     if start:
         if not url.strip():
             st.error("Please enter a URL.")
         elif not category.strip():
             st.error("Please enter a garment category.")
         else:
-            st.divider()
+            # Reset state for a fresh run
+            st.session_state.scrape_results = None
+            st.session_state.scrape_error   = None
+            st.session_state.scrape_stopped = False
+            st.session_state.pages_scraped  = 0
+            st.session_state.items_found    = 0
+            st.session_state.scrape_running = True
+            st.session_state.last_url       = url.strip()
 
-            # Live progress placeholders
-            status_text  = st.empty()
-            progress_bar = st.progress(0)
-            stats_cols   = st.columns(3)
-            pages_box    = stats_cols[0].empty()
-            items_box    = stats_cols[1].empty()
-            dedup_box    = stats_cols[2].empty()
+            stop_event = threading.Event()
+            st.session_state.stop_event = stop_event
 
-            pages_scraped = [0]
-            items_found   = [0]
-
-            def progress_callback(page_num, current_url, total_items):
-                pages_scraped[0] = page_num
-                items_found[0]   = total_items
-                status_text.info(f"📄 Scraping page {page_num} — {current_url}")
-                pages_box.metric("Pages scraped", page_num)
-                items_box.metric("Items found", total_items)
-
-            with st.spinner("Scraping in progress..."):
+            def run_scrape():
                 try:
                     results = scrape_all_pages(
                         start_url=url.strip(),
                         category=category.strip(),
                         follow_pagination=follow_pagination,
                         max_pages=int(max_pages),
-                        progress_callback=progress_callback,
+                        stop_event=stop_event,
+                        progress_callback=lambda pn, cu, ti: (
+                            st.session_state.update({
+                                "pages_scraped": pn,
+                                "items_found":   ti,
+                            })
+                        ),
                     )
+                    st.session_state.scrape_results = results
                 except Exception as e:
-                    st.error(f"Scraping failed: {e}")
-                    st.stop()
+                    st.session_state.scrape_error = str(e)
+                finally:
+                    st.session_state.scrape_running = False
 
-            progress_bar.progress(100)
+            t = threading.Thread(target=run_scrape, daemon=True)
+            st.session_state.scrape_thread = t
+            t.start()
+            st.rerun()
 
-            if not results:
-                st.warning("No items found. The page may be JS-rendered — the scraper will retry with Playwright automatically on the next run, or try a different URL.")
-            else:
-                # ── SUCCESS ───────────────────────────────────────────────────
-                status_text.success(f"✅ Done! Found {len(results)} items across {pages_scraped[0]} page(s).")
-                dedup_box.metric("After dedup", len(results))
+    # ── LIVE PROGRESS (while running) ─────────────────────────────────────────
+    if st.session_state.scrape_running:
+        st.divider()
+        st.info(f"📄 Scraping... page **{st.session_state.pages_scraped}** — **{st.session_state.items_found}** items found so far")
 
-                df = pd.DataFrame(results)
+        col_a, col_b = st.columns(2)
+        col_a.metric("Pages scraped", st.session_state.pages_scraped)
+        col_b.metric("Items found",   st.session_state.items_found)
 
-                st.divider()
-                st.subheader("Preview")
-                st.dataframe(
-                    df,
-                    use_container_width=True,
-                    column_config={
-                        "image_url":  st.column_config.LinkColumn("Image URL"),
-                        "source_url": st.column_config.LinkColumn("Source URL"),
-                    },
-                )
+        time.sleep(1)
+        st.rerun()
 
-                # ── SAVE & DOWNLOAD CSV ───────────────────────────────────────
-                csv_save_path = output_path / csv_filename
-                df.to_csv(csv_save_path, index=False)
-                st.caption(f"💾 Saved to `{csv_save_path}`")
+    # ── RESULTS (after thread finishes) ───────────────────────────────────────
+    if not st.session_state.scrape_running and st.session_state.scrape_results is not None:
+        st.divider()
 
-                csv_bytes = df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="⬇️ Download CSV",
-                    data=csv_bytes,
-                    file_name=csv_filename,
-                    mime="text/csv",
-                    use_container_width=True,
-                )
+        results = st.session_state.scrape_results
 
-                st.info("💡 Review the CSV, remove unwanted rows, then go to the **📥 Download** page.")
+        if st.session_state.scrape_stopped:
+            st.warning(f"⏹ Scraping stopped manually — collected **{len(results)}** items across **{st.session_state.pages_scraped}** page(s).")
+        elif not results:
+            st.warning("No items found. The page may be JS-rendered — the scraper will retry with Playwright automatically on the next run, or try a different URL.")
+        else:
+            st.success(f"✅ Done! Found **{len(results)}** items across **{st.session_state.pages_scraped}** page(s).")
+
+        if results:
+            col_a, col_b, col_c = st.columns(3)
+            col_a.metric("Pages scraped", st.session_state.pages_scraped)
+            col_b.metric("Items found",   len(results))
+            col_c.metric("After dedup",   len(results))
+
+            df = pd.DataFrame(results)
+
+            st.subheader("Preview")
+            st.dataframe(
+                df,
+                use_container_width=True,
+                column_config={
+                    "image_url":  st.column_config.LinkColumn("Image URL"),
+                    "source_url": st.column_config.LinkColumn("Source URL"),
+                },
+            )
+
+            csv_save_path = output_path / csv_filename
+            df.to_csv(csv_save_path, index=False)
+            st.caption(f"💾 Saved to `{csv_save_path}`")
+
+            csv_bytes = df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="⬇️ Download CSV",
+                data=csv_bytes,
+                file_name=csv_filename,
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+            st.info("💡 Review the CSV, remove unwanted rows, then go to the **📥 Download** page.")
+
+    if not st.session_state.scrape_running and st.session_state.scrape_error:
+        st.error(f"Scraping failed: {st.session_state.scrape_error}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -222,12 +290,26 @@ elif page == "📥 Download":
         if pending == 0:
             st.success("✅ Nothing to download — all rows are already done.")
         else:
+            # ── LIMIT INPUT ───────────────────────────────────────────────────
+            col_limit, col_spacer = st.columns([1, 2])
+            with col_limit:
+                use_limit = st.checkbox("Limit downloads this run", value=False)
+                image_limit = None
+                if use_limit:
+                    image_limit = st.number_input(
+                        "Max images to download",
+                        min_value=1,
+                        max_value=pending,
+                        value=min(50, pending),
+                        step=10,
+                        help="Useful for testing or downloading in batches. Skipped/already-done rows don't count toward this limit.",
+                    )
+
+            st.divider()
+
             # ── DOWNLOAD BUTTON ───────────────────────────────────────────────
-            start_dl = st.button(
-                f"🚀 Start Downloading ({pending} images)",
-                use_container_width=True,
-                type="primary",
-            )
+            label = f"🚀 Start Downloading ({image_limit if use_limit else pending} images)"
+            start_dl = st.button(label, use_container_width=True, type="primary")
 
             if start_dl:
                 # Save uploaded CSV to output folder so downloader can update it
@@ -276,6 +358,7 @@ elif page == "📥 Download":
                             csv_path=csv_save_path,
                             output_folder=output_path / "images",
                             progress_callback=progress_callback,
+                            image_limit=image_limit,
                         )
                     except Exception as e:
                         st.error(f"Download failed: {e}")
@@ -288,12 +371,16 @@ elif page == "📥 Download":
                 st.subheader("Summary")
 
                 if summary["failed"] == 0:
-                    st.success(f"✅ All done! {summary['downloaded']} image(s) downloaded successfully.")
+                    msg = f"✅ All done! {summary['downloaded']} image(s) downloaded successfully."
+                    if summary["limit"]:
+                        msg += f" (limit was {summary['limit']})"
+                    st.success(msg)
                 else:
                     st.warning(
                         f"Done with some failures — "
                         f"{summary['downloaded']} downloaded, "
                         f"{summary['failed']} failed."
+                        + (f" Limit was {summary['limit']}." if summary["limit"] else "")
                     )
 
                 col_a, col_b = st.columns(2)

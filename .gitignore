@@ -1,5 +1,5 @@
 __pycache__/
 *.py[oc]
-.venv
 .python-version
+.venv
 pyproject.toml

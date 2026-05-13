@@ -146,6 +146,7 @@ def download_from_csv(
     csv_path: str | Path,
     output_folder: str | Path,
     progress_callback=None,
+    image_limit: int | None = None,
 ) -> dict:
     """
     Read a CSV file and download all images with an empty local_path.
@@ -155,13 +156,14 @@ def download_from_csv(
         output_folder:     Root folder. Images saved to {output_folder}/{category}/
         progress_callback: Optional callable(current, total, filename, status)
                            where status is 'downloading' | 'skipped' | 'failed' | 'no_url'
+        image_limit:       Max images to download this run. None = no limit.
 
     Returns:
         Summary dict with counts: total, downloaded, skipped, failed, no_url
     """
-    csv_path     = Path(csv_path)
+    csv_path      = Path(csv_path)
     output_folder = Path(output_folder)
-    log_path     = output_folder / "failed.log"
+    log_path      = output_folder / "failed.log"
 
     # Load CSV
     df = pd.read_csv(csv_path, dtype=str).fillna("")
@@ -202,6 +204,11 @@ def download_from_csv(
                 progress_callback(current, total, f"row {row_id}", "no_url")
             continue
 
+        # ── Stop if image limit reached ───────────────────────────────────────
+        if image_limit is not None and downloaded >= image_limit:
+            logger.info(f"Image limit of {image_limit} reached, stopping.")
+            break
+
         # ── Build save path ───────────────────────────────────────────────────
         category_folder = output_folder / slugify(category, separator="-")
         _ensure_folder(category_folder)
@@ -238,12 +245,13 @@ def download_from_csv(
         logger.info(f"Failures logged to {log_path}")
 
     summary = {
-        "total":      total,
-        "downloaded": downloaded,
-        "skipped":    skipped,
-        "failed":     failed,
-        "no_url":     no_url,
-        "log_path":   str(log_path) if fail_lines else None,
+        "total":       total,
+        "downloaded":  downloaded,
+        "skipped":     skipped,
+        "failed":      failed,
+        "no_url":      no_url,
+        "limit":       image_limit,
+        "log_path":    str(log_path) if fail_lines else None,
     }
 
     logger.info(f"Download complete: {summary}")
