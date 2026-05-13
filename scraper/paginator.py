@@ -88,6 +88,7 @@ def scrape_all_pages(
     follow_pagination: bool = True,
     max_pages: int = 20,
     progress_callback=None,
+    stop_event=None,
 ) -> list[dict]:
     """
     Scrape a listing page and optionally follow pagination.
@@ -99,6 +100,8 @@ def scrape_all_pages(
         max_pages:          Safety cap to avoid infinite loops.
         progress_callback:  Optional callable(page_num, url, items_so_far)
                             called after each page — used to update Streamlit UI.
+        stop_event:         Optional threading.Event. When set, the loop exits
+                            cleanly after the current page finishes.
 
     Returns:
         List of dicts: {id, title, description, category, image_url, source_url, local_path}
@@ -152,6 +155,11 @@ def scrape_all_pages(
 
         if progress_callback:
             progress_callback(page_num, current_url, len(all_cards))
+
+        # Check stop signal — exit cleanly after this page
+        if stop_event and stop_event.is_set():
+            logger.info("Stop signal received, halting pagination.")
+            break
 
         # Find next page
         if not follow_pagination:

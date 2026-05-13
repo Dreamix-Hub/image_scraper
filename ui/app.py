@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from scraper.paginator import scrape_all_pages
 from scraper.downloader import download_from_csv
 
+
 # ── LOGGING SETUP ─────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -72,13 +73,19 @@ if page == "🔍 Scrape":
     # ── SESSION STATE INIT ────────────────────────────────────────────────────
     if "scrape_thread"   not in st.session_state: st.session_state.scrape_thread   = None
     if "stop_event"      not in st.session_state: st.session_state.stop_event      = None
-    if "scrape_results"  not in st.session_state: st.session_state.scrape_results  = None
-    if "scrape_error"    not in st.session_state: st.session_state.scrape_error    = None
     if "scrape_running"  not in st.session_state: st.session_state.scrape_running  = False
     if "scrape_stopped"  not in st.session_state: st.session_state.scrape_stopped  = False
-    if "pages_scraped"   not in st.session_state: st.session_state.pages_scraped   = 0
-    if "items_found"     not in st.session_state: st.session_state.items_found     = 0
     if "last_url"        not in st.session_state: st.session_state.last_url        = ""
+    # Shared plain dict — thread writes here, main thread reads during rerun
+    # This avoids the "missing ScriptRunContext" error from session_state writes in threads
+    if "shared"          not in st.session_state:
+        st.session_state.shared = {
+            "pages_scraped": 0,
+            "items_found":   0,
+            "results":       None,
+            "error":         None,
+            "done":          False,
+        }
 
     # ── INPUTS ────────────────────────────────────────────────────────────────
     col1, col2 = st.columns([3, 1])
@@ -140,17 +147,24 @@ if page == "🔍 Scrape":
         elif not category.strip():
             st.error("Please enter a garment category.")
         else:
-            # Reset state for a fresh run
-            st.session_state.scrape_results = None
-            st.session_state.scrape_error   = None
-            st.session_state.scrape_stopped = False
-            st.session_state.pages_scraped  = 0
-            st.session_state.items_found    = 0
+            # Reset shared dict and session state for a fresh run
+            st.session_state.shared = {
+                "pages_scraped": 0,
+                "items_found":   0,
+                "results":       None,
+                "error":         None,
+                "done":          False,
+            }
             st.session_state.scrape_running = True
+            st.session_state.scrape_stopped = False
             st.session_state.last_url       = url.strip()
 
             stop_event = threading.Event()
             st.session_state.stop_event = stop_event
+
+            # Get reference to shared dict BEFORE spawning thread
+            # The thread writes here; main thread reads during st.rerun() polls
+            shared = st.session_state.shared
 
             def run_scrape():
                 try:
@@ -160,18 +174,16 @@ if page == "🔍 Scrape":
                         follow_pagination=follow_pagination,
                         max_pages=int(max_pages),
                         stop_event=stop_event,
-                        progress_callback=lambda pn, cu, ti: (
-                            st.session_state.update({
-                                "pages_scraped": pn,
-                                "items_found":   ti,
-                            })
-                        ),
+                        progress_callback=lambda pn, cu, ti: shared.update({
+                            "pages_scraped": pn,
+                            "items_found":   ti,
+                        }),
                     )
-                    st.session_state.scrape_results = results
+                    shared["results"] = results
                 except Exception as e:
-                    st.session_state.scrape_error = str(e)
+                    shared["error"] = str(e)
                 finally:
-                    st.session_state.scrape_running = False
+                    shared["done"] = True
 
             t = threading.Thread(target=run_scrape, daemon=True)
             st.session_state.scrape_thread = t
@@ -180,32 +192,44 @@ if page == "🔍 Scrape":
 
     # ── LIVE PROGRESS (while running) ─────────────────────────────────────────
     if st.session_state.scrape_running:
+        shared = st.session_state.shared
+
+        # Check if thread finished between reruns
+        if shared["done"]:
+            st.session_state.scrape_running = False
+            st.rerun()
+
         st.divider()
-        st.info(f"📄 Scraping... page **{st.session_state.pages_scraped}** — **{st.session_state.items_found}** items found so far")
+        st.info(f"📄 Scraping... page **{shared['pages_scraped']}** — **{shared['items_found']}** items found so far")
 
         col_a, col_b = st.columns(2)
-        col_a.metric("Pages scraped", st.session_state.pages_scraped)
-        col_b.metric("Items found",   st.session_state.items_found)
+        col_a.metric("Pages scraped", shared["pages_scraped"])
+        col_b.metric("Items found",   shared["items_found"])
 
         time.sleep(1)
         st.rerun()
 
     # ── RESULTS (after thread finishes) ───────────────────────────────────────
-    if not st.session_state.scrape_running and st.session_state.scrape_results is not None:
+    if not st.session_state.scrape_running and st.session_state.shared.get("done"):
+        shared  = st.session_state.shared
+        results = shared.get("results") or []
+        error   = shared.get("error")
+        pages   = shared.get("pages_scraped", 0)
+
         st.divider()
 
-        results = st.session_state.scrape_results
-
-        if st.session_state.scrape_stopped:
-            st.warning(f"⏹ Scraping stopped manually — collected **{len(results)}** items across **{st.session_state.pages_scraped}** page(s).")
+        if error:
+            st.error(f"Scraping failed: {error}")
+        elif st.session_state.scrape_stopped:
+            st.warning(f"⏹ Scraping stopped manually — collected **{len(results)}** items across **{pages}** page(s).")
         elif not results:
             st.warning("No items found. The page may be JS-rendered — the scraper will retry with Playwright automatically on the next run, or try a different URL.")
         else:
-            st.success(f"✅ Done! Found **{len(results)}** items across **{st.session_state.pages_scraped}** page(s).")
+            st.success(f"✅ Done! Found **{len(results)}** items across **{pages}** page(s).")
 
         if results:
             col_a, col_b, col_c = st.columns(3)
-            col_a.metric("Pages scraped", st.session_state.pages_scraped)
+            col_a.metric("Pages scraped", pages)
             col_b.metric("Items found",   len(results))
             col_c.metric("After dedup",   len(results))
 
@@ -235,9 +259,6 @@ if page == "🔍 Scrape":
             )
 
             st.info("💡 Review the CSV, remove unwanted rows, then go to the **📥 Download** page.")
-
-    if not st.session_state.scrape_running and st.session_state.scrape_error:
-        st.error(f"Scraping failed: {st.session_state.scrape_error}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
