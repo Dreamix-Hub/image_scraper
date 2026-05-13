@@ -277,13 +277,28 @@ elif page == "📥 Download":
     if uploaded_file:
         df = pd.read_csv(uploaded_file, dtype=str).fillna("")
 
+        # ── SELECT IMAGE COLUMN ───────────────────────────────────────────────
+        st.divider()
+        st.subheader("Configuration")
+        
+        image_column = st.selectbox(
+            "Image URL column",
+            options=df.columns,
+            index=list(df.columns).index("image_url") if "image_url" in df.columns else 0,
+            help="Select which column contains the image URLs to download.",
+        )
+
         # ── VALIDATE COLUMNS ──────────────────────────────────────────────────
-        required = {"id", "title", "category", "image_url", "local_path"}
+        required = {"id", image_column}
         missing  = required - set(df.columns)
 
         if missing:
             st.error(f"CSV is missing required columns: `{missing}`")
             st.stop()
+
+        # ── CREATE local_path COLUMN IF MISSING ───────────────────────────────
+        if "local_path" not in df.columns:
+            df["local_path"] = ""
 
         # ── STATS ─────────────────────────────────────────────────────────────
         st.divider()
@@ -291,9 +306,9 @@ elif page == "📥 Download":
 
         total       = len(df)
         already_done = df["local_path"].apply(
-            lambda p: bool(p.strip()) and Path(p.strip()).exists()
+            lambda p: bool(str(p).strip()) and Path(str(p).strip()).exists()
         ).sum()
-        no_url      = df["image_url"].apply(lambda u: not u.strip()).sum()
+        no_url      = df[image_column].apply(lambda u: not str(u).strip()).sum()
         pending     = total - already_done - no_url
 
         c1, c2, c3, c4 = st.columns(4)
@@ -380,6 +395,7 @@ elif page == "📥 Download":
                             output_folder=output_path / "images",
                             progress_callback=progress_callback,
                             image_limit=image_limit,
+                            image_column=image_column,
                         )
                     except Exception as e:
                         st.error(f"Download failed: {e}")

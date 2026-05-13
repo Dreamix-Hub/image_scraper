@@ -43,15 +43,33 @@ def fetch_html(url: str, timeout: int = 15) -> str | None:
 def fetch_html_playwright(url: str) -> str | None:
     """
     Fallback: fetch HTML via headless Chromium (for JS-rendered pages).
-    Used when httpx returns empty or no product cards detected.
+    Waits for network idle and product content to load before scraping.
     """
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(extra_http_headers=HEADERS)
-            page.goto(url, timeout=20000, wait_until="domcontentloaded")
-            page.wait_for_timeout(2500)  # let JS render
+            
+            # Navigate and wait for page to fully load
+            page.goto(url, timeout=20000, wait_until="load")
+            
+            # Wait for network to be idle (no pending requests)
+            page.wait_for_load_state("networkidle", timeout=10000)
+            
+            # Try to wait for product containers or images to appear
+            try:
+                page.wait_for_selector(
+                    "img[src], img[data-src], img[data-lazy-src], "
+                    "[class*='product'], [class*='item'], [class*='card']",
+                    timeout=5000,
+                )
+                logger.info(f"Content loaded for {url}")
+            except Exception:
+                # If selectors don't match, just wait a bit longer
+                logger.warning(f"Product selectors not found, waiting extra time for {url}")
+                page.wait_for_timeout(3000)
+            
             html = page.content()
             browser.close()
             return html
@@ -295,3 +313,127 @@ def _extract_by_image_sweep(soup: BeautifulSoup, base_url: str) -> list[dict]:
         })
 
     return results
+
+
+# ── PRODUCT DETAIL GALLERY EXTRACTION ────────────────────────────────────────
+
+# CSS class/id fragments that wrap product image galleries
+GALLERY_HINTS = [
+    "gallery", "product-image", "product-photo", "product-media",
+    "product-img", "zoom", "lightbox", "swiper", "slider",
+    "carousel", "thumbnails", "thumb", "image-viewer",
+]
+
+# Attributes that often carry the full-res URL (lazy-load / zoom patterns)
+HIRES_ATTRS = [
+    "data-zoom-image", "data-large", "data-full",
+    "data-original", "data-hi-res", "data-src",
+    "data-lazy-src", "data-image", "data-zoom",
+    "data-srcset", "srcset",
+]
+
+
+def extract_gallery_images(soup: BeautifulSoup, base_url: str, min_size: int = 200) -> list[str]:
+    """
+    Extract all product gallery image URLs from a product detail page.
+
+    Strategy:
+      1. Look for known gallery container elements by class/id hints
+      2. Within those containers collect every <img> with a real src
+      3. Also check hi-res data-* attributes (zoom, lazy-load patterns)
+      4. Parse srcset to pick the largest available image
+      5. Fallback: collect all page <img> tags above min_size threshold
+      6. Deduplicate and return ordered list (index 0 = main image)
+
+    Args:
+        soup:     Parsed BeautifulSoup of the product detail page.
+        base_url: Used to resolve relative URLs.
+        min_size: Minimum width or height in px to accept an image (filters icons).
+
+    Returns:
+        List of absolute image URLs, deduplicated.
+    """
+    collected = []
+    seen      = set()
+
+    def _add(url: str):
+        url = url.strip()
+        if url and url not in seen and not url.startswith("data:"):
+            seen.add(url)
+            collected.append(urljoin(base_url, url))
+
+    def _best_from_srcset(srcset: str) -> str:
+        """Parse a srcset string and return the URL with the highest width descriptor."""
+        best_url  = ""
+        best_w    = 0
+        for part in srcset.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            tokens = part.split()
+            if not tokens:
+                continue
+            url = tokens[0]
+            w   = 0
+            if len(tokens) > 1:
+                try:
+                    w = int(tokens[1].rstrip("w"))
+                except ValueError:
+                    pass
+            if w > best_w:
+                best_w   = w
+                best_url = url
+        return best_url or (tokens[0] if tokens else "")
+
+    def _harvest_imgs(container):
+        """Collect all usable image URLs from a container element."""
+        for img in container.find_all("img"):
+            # Check hi-res / lazy-load data attributes first (higher quality)
+            for attr in HIRES_ATTRS:
+                val = img.get(attr, "").strip()
+                if not val:
+                    continue
+                if attr in ("srcset", "data-srcset"):
+                    best = _best_from_srcset(val)
+                    if best:
+                        _add(best)
+                else:
+                    _add(val)
+
+            # Standard src
+            src = img.get("src", "").strip()
+            if src:
+                # Skip if it's a 1×1 tracker or tiny icon by dimensions
+                try:
+                    w = int(img.get("width",  min_size + 1))
+                    h = int(img.get("height", min_size + 1))
+                    if w < min_size and h < min_size:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+                _add(src)
+
+    # ── Step 1: gallery containers ────────────────────────────────────────────
+    gallery_containers = []
+    for tag in soup.find_all(True):
+        classes  = " ".join(tag.get("class", [])).lower()
+        tag_id   = tag.get("id", "").lower()
+        combined = classes + " " + tag_id
+        if any(hint in combined for hint in GALLERY_HINTS):
+            gallery_containers.append(tag)
+
+    for container in gallery_containers:
+        _harvest_imgs(container)
+
+    # ── Step 2: fallback — full page sweep if gallery found < 2 images ───────
+    if len(collected) < 2:
+        _harvest_imgs(soup)
+
+    # ── Step 3: also check <a> tags that link directly to images ─────────────
+    IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".avif"}
+    for a in soup.find_all("a", href=True):
+        href = a["href"].lower().split("?")[0]
+        if any(href.endswith(ext) for ext in IMAGE_EXTS):
+            _add(a["href"])
+
+    return collected

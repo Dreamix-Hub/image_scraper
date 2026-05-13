@@ -147,6 +147,7 @@ def download_from_csv(
     output_folder: str | Path,
     progress_callback=None,
     image_limit: int | None = None,
+    image_column: str = "image_url",
 ) -> dict:
     """
     Read a CSV file and download all images with an empty local_path.
@@ -157,6 +158,7 @@ def download_from_csv(
         progress_callback: Optional callable(current, total, filename, status)
                            where status is 'downloading' | 'skipped' | 'failed' | 'no_url'
         image_limit:       Max images to download this run. None = no limit.
+        image_column:      Name of the column containing image URLs (default: "image_url").
 
     Returns:
         Summary dict with counts: total, downloaded, skipped, failed, no_url
@@ -168,8 +170,8 @@ def download_from_csv(
     # Load CSV
     df = pd.read_csv(csv_path, dtype=str).fillna("")
 
-    # Ensure required columns exist
-    required = {"id", "title", "category", "image_url", "local_path"}
+    # Ensure required columns exist (title and category have defaults)
+    required = {"id", "local_path", image_column}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"CSV is missing required columns: {missing}")
@@ -185,7 +187,7 @@ def download_from_csv(
         row_id    = str(row.get("id", idx)).strip()
         title     = str(row.get("title", "")).strip()
         category  = str(row.get("category", "uncategorized")).strip()
-        image_url = str(row.get("image_url", "")).strip()
+        image_url = str(row.get(image_column, "")).strip()
         local_path = str(row.get("local_path", "")).strip()
 
         current = idx + 1  # 1-based progress
@@ -215,6 +217,15 @@ def download_from_csv(
 
         filename  = _make_filename(row_id, title, ".jpg")  # always save as .jpg
         save_path = category_folder / filename
+
+        # ── Check if file already exists in the output directory ──────────────
+        if save_path.exists():
+            skipped += 1
+            df.at[idx, "local_path"] = str(save_path)
+            if progress_callback:
+                progress_callback(current, total, filename, "skipped")
+            logger.info(f"File already exists, skipping: {save_path}")
+            continue
 
         if progress_callback:
             progress_callback(current, total, filename, "downloading")

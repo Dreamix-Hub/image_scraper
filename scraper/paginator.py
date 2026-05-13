@@ -138,6 +138,18 @@ def scrape_all_pages(
         # Extract cards from this page
         page_cards = extract_cards(soup, current_url)
 
+        # If we found very few cards on first attempt, try Playwright
+        # (page might be JS-rendered and httpx didn't capture it fully)
+        if len(page_cards) < 2:
+            logger.info(f"Found only {len(page_cards)} item(s) with httpx, trying Playwright for better results...")
+            html_pw = fetch_html_playwright(current_url)
+            if html_pw:
+                soup = BeautifulSoup(html_pw, "lxml")
+                page_cards_pw = extract_cards(soup, current_url)
+                if len(page_cards_pw) > len(page_cards):
+                    logger.info(f"Playwright found {len(page_cards_pw)} items (vs {len(page_cards)} from httpx)")
+                    page_cards = page_cards_pw
+
         # Filter out already-seen image URLs
         new_cards = []
         for card in page_cards:
