@@ -1,8 +1,5 @@
-# Python-generated files
 __pycache__/
 *.py[oc]
-
-# Virtual environments
 .venv
 .python-version
 pyproject.toml
