@@ -3,4 +3,4 @@ __pycache__/
 .python-version
 .venv
 pyproject.toml
-/output
+output
