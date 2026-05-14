@@ -14,7 +14,7 @@ import logging
 from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
 
 from bs4 import BeautifulSoup
-from scraper.parser import fetch_html, fetch_html_playwright, extract_cards
+from scraper.parser import fetch_html, fetch_html_playwright, extract_cards, _needs_javascript
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,14 @@ def scrape_all_pages(
         # Fetch HTML — try plain httpx first
         html = fetch_html(current_url)
 
-        # If nothing useful came back, try Playwright
+        # Check if page needs JavaScript rendering
+        if html and _needs_javascript(html):
+            logger.info(f"Page {page_num} appears to be JS-rendered, using Playwright for better results...")
+            html_pw = fetch_html_playwright(current_url)
+            if html_pw:
+                html = html_pw
+        
+        # If httpx returned nothing, definitely try Playwright
         if not html:
             logger.warning(f"httpx returned nothing for page {page_num}, trying Playwright...")
             html = fetch_html_playwright(current_url)

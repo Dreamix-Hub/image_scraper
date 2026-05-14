@@ -224,7 +224,7 @@ def download_from_csv(
             df.at[idx, "local_path"] = str(save_path)
             if progress_callback:
                 progress_callback(current, total, filename, "skipped")
-            logger.info(f"File already exists, skipping: {save_path}")
+            logger.info(f"Fil   e already exists, skipping: {save_path}")
             continue
 
         if progress_callback:

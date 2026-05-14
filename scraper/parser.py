@@ -31,48 +31,152 @@ HEADERS = {
 def fetch_html(url: str, timeout: int = 15) -> str | None:
     """Fetch raw HTML from a URL using httpx. Returns None on failure."""
     try:
-        with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=timeout) as client:
+        with httpx.Client(
+            headers=HEADERS,
+            follow_redirects=True,
+            timeout=timeout,
+            http2=False,  # Disable HTTP/2 to avoid some protocol errors
+        ) as client:
             response = client.get(url)
             response.raise_for_status()
             return response.text
     except Exception as e:
-        logger.error(f"Failed to fetch {url}: {e}")
+        logger.debug(f"httpx fetch failed for {url}: {e}")
         return None
+
+
+def _needs_javascript(html: str) -> bool:
+    """
+    Detect if HTML likely needs JavaScript rendering.
+    Returns True if the page appears to be JS-heavy.
+    """
+    if not html:
+        return True
+    
+    # Check for signs of JS-rendered content
+    js_indicators = [
+        "react", "vue", "angular", "next.js", "nuxt",  # Framework indicators
+        "data-react", "data-vue", "__NEXT_DATA__",      # React/Vue specific
+        "<noscript>", "window.location", "window.fetch", # JS dependency markers
+        "json-ld", "schema.org",                        # Structured data (often lazy-loaded)
+    ]
+    
+    html_lower = html.lower()
+    for indicator in js_indicators:
+        if indicator in html_lower:
+            logger.debug(f"Detected JS indicator: {indicator}")
+            return True
+    
+    # Check if there are very few actual product elements
+    soup = BeautifulSoup(html, "lxml")
+    product_elements = soup.find_all(class_=lambda x: x and any(
+        keyword in x.lower() for keyword in ["product", "item", "card", "listing", "tile"]
+    ))
+    
+    img_tags = soup.find_all("img", src=True)
+    
+    if len(product_elements) == 0 and len(img_tags) < 3:
+        logger.debug("Very few product elements or images found, likely needs JS rendering")
+        return True
+    
+    return False
 
 
 def fetch_html_playwright(url: str) -> str | None:
     """
     Fallback: fetch HTML via headless Chromium (for JS-rendered pages).
-    Waits for network idle and product content to load before scraping.
+    Waits for network idle, scrolls to trigger lazy loading, and waits for content.
+    Includes anti-bot detection measures.
     """
     try:
         from playwright.sync_api import sync_playwright
+        
+        logger.info(f"Loading {url} with Playwright...")
+        
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page(extra_http_headers=HEADERS)
+            # Launch with anti-detection arguments
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-web-resources",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                ]
+            )
             
-            # Navigate and wait for page to fully load
-            page.goto(url, timeout=20000, wait_until="load")
+            # Create context with realistic settings
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1920, "height": 1080},
+                extra_http_headers=HEADERS,
+                ignore_https_errors=True,
+            )
             
-            # Wait for network to be idle (no pending requests)
-            page.wait_for_load_state("networkidle", timeout=10000)
+            page = context.new_page()
             
-            # Try to wait for product containers or images to appear
+            # Add script to hide headless indicators
+            page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined,
+                });
+                window.chrome = { runtime: {} };
+            """)
+            
+            try:
+                # Try to navigate with different wait strategies
+                page.goto(url, timeout=20000, wait_until="domcontentloaded")
+                logger.info(f"Page loaded for {url}")
+            except Exception as nav_err:
+                logger.warning(f"Navigation error: {nav_err}, retrying with different strategy...")
+                try:
+                    # Retry with simpler approach
+                    page.goto(url, timeout=15000)
+                except Exception as retry_err:
+                    logger.error(f"Failed to navigate after retry: {retry_err}")
+                    browser.close()
+                    return None
+            
+            # Wait for network to settle
+            try:
+                page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                logger.debug("Network idle timeout, continuing anyway...")
+            
+            # Scroll to trigger lazy loading
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1500)
+            
+            # Scroll back to top to capture all content
+            page.evaluate("window.scrollTo(0, 0)")
+            page.wait_for_timeout(1000)
+            
+            # Try to wait for product containers
             try:
                 page.wait_for_selector(
-                    "img[src], img[data-src], img[data-lazy-src], "
-                    "[class*='product'], [class*='item'], [class*='card']",
+                    "img[src], img[data-src], [class*='product'], [class*='item']",
                     timeout=5000,
                 )
-                logger.info(f"Content loaded for {url}")
+                logger.info(f"Content detected for {url}")
             except Exception:
-                # If selectors don't match, just wait a bit longer
-                logger.warning(f"Product selectors not found, waiting extra time for {url}")
-                page.wait_for_timeout(3000)
+                logger.debug("Product selectors timeout, proceeding anyway...")
             
+            # Get final HTML
             html = page.content()
+            
+            # Cleanup
+            page.close()
+            context.close()
             browser.close()
+            
+            logger.info(f"Playwright successfully fetched {url} ({len(html)} bytes)")
             return html
+            
+    except ImportError:
+        logger.error("Playwright not installed or browser not available")
+        return None
     except Exception as e:
         logger.error(f"Playwright failed for {url}: {e}")
         return None
