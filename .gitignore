@@ -5,3 +5,4 @@ __pycache__/
 pyproject.toml
 uv.lock
 venv
+output/
