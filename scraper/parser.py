@@ -22,9 +22,19 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
+        "Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
     ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "DNT": "1",
+    "Sec-CH-UA": '"Not_A Brand";v="8", "Chromium";v="124", "Microsoft Edge";v="124"',
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 
@@ -71,11 +81,21 @@ def fetch_html_playwright(url: str, wait_for_selector: str | None = None) -> str
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"]
+            )
             context = browser.new_context(
                 viewport={"width": 1440, "height": 900},
                 user_agent=HEADERS["User-Agent"],
-                extra_http_headers={"Accept-Language": HEADERS["Accept-Language"]},
+                extra_http_headers={
+                    "Accept-Language": HEADERS["Accept-Language"],
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "DNT": "1",
+                    "Connection": "keep-alive",
+                    "Upgrade-Insecure-Requests": "1"
+                },
             )
             page = context.new_page()
 
@@ -87,11 +107,21 @@ def fetch_html_playwright(url: str, wait_for_selector: str | None = None) -> str
 
             try:
                 page.goto(url, timeout=30000, wait_until="networkidle")
-            except PWTimeout:
-                # networkidle can time out on chatty sites — fall back to domcontentloaded
-                logger.warning(f"networkidle timeout for {url}, falling back to domcontentloaded")
-                page.goto(url, timeout=30000, wait_until="domcontentloaded")
-                page.wait_for_timeout(3000)
+            except Exception as e:
+                # networkidle can time out or fail — fall back to domcontentloaded
+                logger.warning(f"networkidle failed for {url} ({type(e).__name__}), falling back to domcontentloaded")
+                try:
+                    page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                    page.wait_for_timeout(3000)
+                except Exception as e2:
+                    # Last resort: just load whatever we can
+                    logger.warning(f"domcontentloaded also failed, trying load with timeout...")
+                    try:
+                        page.goto(url, timeout=15000, wait_until="load")
+                    except Exception as e3:
+                        logger.error(f"All page load strategies failed for {url}: {e3}")
+                        browser.close()
+                        return None
 
             # Try to dismiss cookie consent banners
             for selector in [
@@ -117,27 +147,50 @@ def fetch_html_playwright(url: str, wait_for_selector: str | None = None) -> str
                 except PWTimeout:
                     pass
 
+            # Wait for product elements to appear (common CSS patterns)
+            product_selectors = [
+                "[class*='product']",
+                "[class*='item']",
+                "[class*='card']",
+                "article",
+                "[data-product]",
+            ]
+            
+            for selector in product_selectors:
+                try:
+                    page.wait_for_selector(selector, timeout=3000)
+                    logger.info(f"Found product selector: {selector}")
+                    break
+                except PWTimeout:
+                    continue
+            
+            # Extra wait to ensure JS finishes rendering
+            page.wait_for_timeout(2000)
+
             # Auto-scroll to trigger lazy-loaded images
-            page.evaluate("""
-                async () => {
-                    await new Promise(resolve => {
-                        let total = document.body.scrollHeight;
-                        let current = 0;
-                        const step = 400;
-                        const delay = 120;
-                        const timer = setInterval(() => {
-                            window.scrollBy(0, step);
-                            current += step;
-                            if (current >= total) {
-                                clearInterval(timer);
-                                window.scrollTo(0, 0);
-                                resolve();
-                            }
-                        }, delay);
-                    });
-                }
-            """)
-            page.wait_for_timeout(1000)  # brief settle after scroll
+            try:
+                page.evaluate("""
+                    async () => {
+                        await new Promise(resolve => {
+                            let total = document.body.scrollHeight;
+                            let current = 0;
+                            const step = 400;
+                            const delay = 120;
+                            const timer = setInterval(() => {
+                                window.scrollBy(0, step);
+                                current += step;
+                                if (current >= total) {
+                                    clearInterval(timer);
+                                    window.scrollTo(0, 0);
+                                    resolve();
+                                }
+                            }, delay);
+                        });
+                    }
+                """)
+                page.wait_for_timeout(1000)  # brief settle after scroll
+            except Exception as e:
+                logger.warning(f"Scroll failed for {url}: {e}")
 
             html = page.content()
             browser.close()
