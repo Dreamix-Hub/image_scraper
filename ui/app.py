@@ -24,8 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scraper.paginator import scrape_all_pages
 from scraper.downloader import download_from_csv
-
-
+                                                                
 # ── LOGGING SETUP ─────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -114,6 +113,15 @@ if page == "🔍 Scrape":
     with col4:
         follow_pagination = st.checkbox("Follow pagination", value=True,  disabled=st.session_state.scrape_running)
         max_pages         = st.number_input("Max pages", min_value=1, max_value=100, value=20, disabled=st.session_state.scrape_running)
+
+    deep_scrape = st.checkbox(
+        "🔍 Deep scrape — visit each product page to collect all gallery images",
+        value=False,
+        disabled=st.session_state.scrape_running,
+        help="Visits every product's detail page and extracts all preview images. Each image becomes its own CSV row. Much slower — expect 2–5 seconds per product.",
+    )
+    if deep_scrape:
+        st.caption("⚠️ Deep scrape visits every product page individually. For 50 products expect ~3–5 minutes.")
 
     st.divider()
 
@@ -277,28 +285,13 @@ elif page == "📥 Download":
     if uploaded_file:
         df = pd.read_csv(uploaded_file, dtype=str).fillna("")
 
-        # ── SELECT IMAGE COLUMN ───────────────────────────────────────────────
-        st.divider()
-        st.subheader("Configuration")
-        
-        image_column = st.selectbox(
-            "Image URL column",
-            options=df.columns,
-            index=list(df.columns).index("image_url") if "image_url" in df.columns else 0,
-            help="Select which column contains the image URLs to download.",
-        )
-
         # ── VALIDATE COLUMNS ──────────────────────────────────────────────────
-        required = {"id", image_column}
+        required = {"id", "title", "category", "image_url", "local_path"}
         missing  = required - set(df.columns)
 
         if missing:
             st.error(f"CSV is missing required columns: `{missing}`")
             st.stop()
-
-        # ── CREATE local_path COLUMN IF MISSING ───────────────────────────────
-        if "local_path" not in df.columns:
-            df["local_path"] = ""
 
         # ── STATS ─────────────────────────────────────────────────────────────
         st.divider()
@@ -306,9 +299,9 @@ elif page == "📥 Download":
 
         total       = len(df)
         already_done = df["local_path"].apply(
-            lambda p: bool(str(p).strip()) and Path(str(p).strip()).exists()
+            lambda p: bool(p.strip()) and Path(p.strip()).exists()
         ).sum()
-        no_url      = df[image_column].apply(lambda u: not str(u).strip()).sum()
+        no_url      = df["image_url"].apply(lambda u: not u.strip()).sum()
         pending     = total - already_done - no_url
 
         c1, c2, c3, c4 = st.columns(4)
@@ -395,7 +388,6 @@ elif page == "📥 Download":
                             output_folder=output_path / "images",
                             progress_callback=progress_callback,
                             image_limit=image_limit,
-                            image_column=image_column,
                         )
                     except Exception as e:
                         st.error(f"Download failed: {e}")
