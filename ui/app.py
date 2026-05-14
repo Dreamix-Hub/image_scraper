@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scraper.paginator import scrape_all_pages
 from scraper.downloader import download_from_csv
-                                                                
+
 # ── LOGGING SETUP ─────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -181,6 +181,7 @@ if page == "🔍 Scrape":
                         category=category.strip(),
                         follow_pagination=follow_pagination,
                         max_pages=int(max_pages),
+                        deep_scrape=deep_scrape,
                         stop_event=stop_event,
                         progress_callback=lambda pn, cu, ti: shared.update({
                             "pages_scraped": pn,

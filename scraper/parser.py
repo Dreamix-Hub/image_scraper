@@ -333,10 +333,15 @@ def extract_cards(soup: BeautifulSoup, base_url: str) -> list[dict]:
     Returns a list of dicts with title, description, image_url, source_url.
     Falls back to extracting all unique images with their nearby text.
     """
-    cards = _extract_by_card_heuristic(soup, base_url)
-
+    # Try framework-specific patterns first (Shopify Hydrogen, etc.)
+    cards = _extract_by_framework_patterns(soup, base_url)
+    
+    # If not enough, try generic heuristic
     if len(cards) < 2:
-        # Fallback: grab all images with nearby headings
+        cards = _extract_by_card_heuristic(soup, base_url)
+
+    # If still not enough, fallback: grab all images with nearby headings
+    if len(cards) < 2:
         logger.warning("Card heuristic found < 2 items, falling back to image sweep.")
         cards = _extract_by_image_sweep(soup, base_url)
 
@@ -350,6 +355,70 @@ def extract_cards(soup: BeautifulSoup, base_url: str) -> list[dict]:
             unique.append(card)
 
     return unique
+
+
+def _extract_by_framework_patterns(soup: BeautifulSoup, base_url: str) -> list[dict]:
+    """
+    Try framework-specific product container patterns first.
+    Supports: Shopify Hydrogen (hdt-card-product), WooCommerce, etc.
+    """
+    candidates = []
+    
+    # Shopify Hydrogen framework patterns
+    framework_selectors = [
+        'div[class*="hdt-card-product"]',  # Hydrogen Design Tokens
+        'div[class*="product-card"]',       # Generic product-card
+        'li[class*="product-item"]',        # Product list items
+        '[data-product-id]',                # Data attribute pattern
+    ]
+    
+    for selector in framework_selectors:
+        elements = soup.select(selector)
+        if len(elements) >= 2:  # Only use if we find at least 2
+            for tag in elements:
+                img = tag.find("img")
+                if not img:
+                    continue
+                
+                src = (
+                    img.get("src")
+                    or img.get("data-src")
+                    or img.get("data-lazy-src")
+                    or ""
+                )
+                if not src or src.startswith("data:"):
+                    continue
+                
+                # Extract title from various locations
+                title = ""
+                for h in ["h2", "h3", "a[href*='/products/']", "span[class*='title']", "span", "a"]:
+                    el = tag.select_one(h)
+                    if el and el.get_text(strip=True):
+                        title = el.get_text(strip=True)[:100]
+                        break
+                
+                # Extract description
+                desc = ""
+                p = tag.find("p")
+                if p:
+                    desc = p.get_text(strip=True)[:300]
+                
+                # Extract product link
+                link = tag.find("a", href=True)
+                source_url = urljoin(base_url, link["href"]) if link else base_url
+                
+                candidates.append({
+                    "title":       title,
+                    "description": desc,
+                    "image_url":   urljoin(base_url, src),
+                    "source_url":  source_url,
+                })
+            
+            if candidates:
+                logger.info(f"Found {len(candidates)} products using framework pattern: {selector}")
+                return candidates
+    
+    return candidates
 
 
 def _extract_by_card_heuristic(soup: BeautifulSoup, base_url: str) -> list[dict]:
