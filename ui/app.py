@@ -254,9 +254,10 @@ if page == "🔍 Scrape":
                 },
             )
 
+            # ── SAVE CSV TO DISK ──────────────────────────────────────────────
             csv_save_path = output_path / csv_filename
             df.to_csv(csv_save_path, index=False)
-            st.caption(f"💾 Saved to `{csv_save_path}`")
+            st.success(f"✅ CSV saved successfully to: `{csv_save_path}`")
 
             csv_bytes = df.to_csv(index=False).encode("utf-8")
             st.download_button(
@@ -268,6 +269,10 @@ if page == "🔍 Scrape":
             )
 
             st.info("💡 Review the CSV, remove unwanted rows, then go to the **📥 Download** page.")
+        
+        # ── Handle stopped state with no results ───────────────────────────────
+        elif st.session_state.scrape_stopped and pages > 0:
+            st.info("⏹ Scraping was stopped before any items were found. Try adjusting the URL or removing filters.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
