@@ -365,3 +365,4 @@ Possible improvements:
 MIT License — Free for personal and research use.
 
 ---
+Give it a star ⭐ if you like it :)
