@@ -40,7 +40,6 @@ st.set_page_config(
 
 # ── SIDEBAR NAV ───────────────────────────────────────────────────────────────
 st.sidebar.title("🖼️ Image Scraper")
-st.sidebar.caption("FYP Dataset Collection Tool")
 st.sidebar.divider()
 
 page = st.sidebar.radio(
